@@ -151,7 +151,7 @@ class cmake_build_ext(build_ext):
                 num_jobs = os.cpu_count()
 
         nvcc_threads = None
-        if _is_cuda() and CUDA_HOME is not None:
+        if _is_cuda() and envs.CUDA_HOME is not None:
             try:
                 nvcc_version = get_selected_cuda_version()
                 if nvcc_version >= Version("11.2"):
@@ -248,8 +248,8 @@ class cmake_build_ext(build_ext):
             # Default build tool to whatever cmake picks.
             build_tool = []
         # Make sure we use the nvcc from CUDA_HOME
-        if _is_cuda() and CUDA_HOME is not None:
-            cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
+        if _is_cuda() and envs.CUDA_HOME is not None:
+            cmake_args += [f"-DCMAKE_CUDA_COMPILER={envs.CUDA_HOME}/bin/nvcc"]
         elif _is_hip() and ROCM_HOME is not None:
             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
 
@@ -853,9 +853,9 @@ def get_nvcc_cuda_version() -> Version:
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
-    assert CUDA_HOME is not None, "CUDA_HOME is not set"
+    assert envs.CUDA_HOME is not None, "CUDA_HOME is not set"
     nvcc_output = subprocess.check_output(
-        [CUDA_HOME + "/bin/nvcc", "-V"], universal_newlines=True
+        [envs.CUDA_HOME + "/bin/nvcc", "-V"], universal_newlines=True
     )
     output = nvcc_output.split()
     release_idx = output.index("release") + 1
@@ -900,7 +900,7 @@ if _is_cuda():
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
     if envs.VLLM_USE_PRECOMPILED or (
-        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
+        envs.CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
     ):
         # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
         # Optional since it won't build on unsupported architectures
