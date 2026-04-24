@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ctypes
 import importlib.util
 import json
 import logging
@@ -14,12 +13,9 @@ import sysconfig
 from pathlib import Path
 from shutil import which
 
-import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
-from setuptools_scm import get_version
-from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
 
 def load_module_from_path(module_name, path):
@@ -37,32 +33,7 @@ logger = logging.getLogger(__name__)
 #  which is not installed yet
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
 
-VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
-
-if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
-    logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
-    VLLM_TARGET_DEVICE = "cpu"
-elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
-    logger.warning(
-        "vLLM only supports Linux platform (including WSL) and MacOS."
-        "Building on %s, "
-        "so vLLM may not be able to run correctly",
-        sys.platform,
-    )
-    VLLM_TARGET_DEVICE = "empty"
-elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is None:
-    if torch.version.hip is not None:
-        VLLM_TARGET_DEVICE = "rocm"
-        logger.info("Auto-detected ROCm")
-    elif torch.version.xpu is not None:
-        VLLM_TARGET_DEVICE = "xpu"
-        logger.info("Auto-detected XPU")
-    elif torch.version.cuda is not None:
-        VLLM_TARGET_DEVICE = "cuda"
-        logger.info("Auto-detected CUDA")
-    else:
-        VLLM_TARGET_DEVICE = "cpu"
-
+VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE or "empty"
 
 def is_sccache_available() -> bool:
     return which("sccache") is not None and not bool(
@@ -173,7 +144,7 @@ class cmake_build_ext(build_ext):
         nvcc_threads = None
         if _is_cuda() and CUDA_HOME is not None:
             try:
-                nvcc_version = get_nvcc_cuda_version()
+                nvcc_version = get_selected_cuda_version()
                 if nvcc_version >= Version("11.2"):
                     # `nvcc_threads` is either the value of the NVCC_THREADS
                     # environment variable (if defined) or 1.
@@ -421,12 +392,7 @@ class precompiled_wheel_utils:
             return True
         if which("rocminfo") is not None:
             return True
-        try:
-            import torch
-
-            return torch.version.hip is not None
-        except ImportError:
-            return False
+        return False
 
     @staticmethod
     def detect_system_cuda_variant() -> str:
@@ -441,14 +407,7 @@ class precompiled_wheel_utils:
             print(f"Using VLLM_MAIN_CUDA_VERSION={v}")
             return "cu" + v.replace(".", "")[:3]
 
-        # Try torch.version.cuda
         cuda_version = None
-        try:
-            import torch
-
-            cuda_version = torch.version.cuda
-        except Exception:
-            pass
 
         # Try nvidia-smi
         if not cuda_version:
@@ -791,14 +750,13 @@ def _no_device() -> bool:
 
 
 def _is_cuda() -> bool:
-    has_cuda = torch.version.cuda is not None
-    return VLLM_TARGET_DEVICE == "cuda" and has_cuda and not _is_tpu()
+    return VLLM_TARGET_DEVICE == "cuda" and not _is_tpu()
 
 
 def _is_hip() -> bool:
     return (
         VLLM_TARGET_DEVICE == "cuda" or VLLM_TARGET_DEVICE == "rocm"
-    ) and torch.version.hip is not None
+    ) 
 
 
 def _is_tpu() -> bool:
@@ -817,39 +775,10 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip()
 
 
-def get_rocm_version():
-    # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
-    # see https://github.com/ROCm/rocm-core/blob/d11f5c20d500f729c393680a01fa902ebf92094b/rocm_version.cpp#L21
-    try:
-        if ROCM_HOME is None:
-            return None
-        librocm_core_file = Path(ROCM_HOME) / "lib" / "librocm-core.so"
-        if not librocm_core_file.is_file():
-            return None
-        librocm_core = ctypes.CDLL(librocm_core_file)
-        VerErrors = ctypes.c_uint32
-        get_rocm_core_version = librocm_core.getROCmVersion
-        get_rocm_core_version.restype = VerErrors
-        get_rocm_core_version.argtypes = [
-            ctypes.POINTER(ctypes.c_uint32),
-            ctypes.POINTER(ctypes.c_uint32),
-            ctypes.POINTER(ctypes.c_uint32),
-        ]
-        major = ctypes.c_uint32()
-        minor = ctypes.c_uint32()
-        patch = ctypes.c_uint32()
-
-        if (
-            get_rocm_core_version(
-                ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch)
-            )
-            == 0
-        ):
-            return f"{major.value}.{minor.value}.{patch.value}"
-        return None
-    except Exception:
-        return None
-
+def get_selected_cuda_version() -> Version:
+    if value := os.getenv("VLLM_CUDA_VERSION"):
+        return Version(value)
+    return get_nvcc_cuda_version()
 
 def get_nvcc_cuda_version() -> Version:
     """Get the CUDA version from nvcc.
@@ -864,93 +793,6 @@ def get_nvcc_cuda_version() -> Version:
     release_idx = output.index("release") + 1
     nvcc_cuda_version = parse(output[release_idx].split(",")[0])
     return nvcc_cuda_version
-
-
-def get_vllm_version() -> str:
-    # Allow overriding the version. This is useful to build platform-specific
-    # wheels (e.g. CPU, TPU) without modifying the source.
-    if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
-        print(f"Overriding VLLM version with {env_version} from VLLM_VERSION_OVERRIDE")
-        os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
-        return get_version(write_to="vllm/_version.py")
-
-    version = get_version(write_to="vllm/_version.py")
-    sep = "+" if "+" not in version else "."  # dev versions might contain +
-
-    if _no_device():
-        if envs.VLLM_TARGET_DEVICE == "empty":
-            version += f"{sep}empty"
-    elif _is_cuda():
-        if envs.VLLM_USE_PRECOMPILED and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX:
-            version += f"{sep}precompiled"
-        else:
-            cuda_version = str(get_nvcc_cuda_version())
-            if cuda_version != envs.VLLM_MAIN_CUDA_VERSION:
-                cuda_version_str = cuda_version.replace(".", "")[:3]
-                # skip this for source tarball, required for pypi
-                if "sdist" not in sys.argv:
-                    version += f"{sep}cu{cuda_version_str}"
-    elif _is_hip():
-        # Get the Rocm Version
-        rocm_version = get_rocm_version() or torch.version.hip
-        if rocm_version and rocm_version != envs.VLLM_MAIN_CUDA_VERSION:
-            version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
-    elif _is_tpu():
-        version += f"{sep}tpu"
-    elif _is_cpu():
-        if envs.VLLM_TARGET_DEVICE == "cpu":
-            version += f"{sep}cpu"
-    elif _is_xpu():
-        version += f"{sep}xpu"
-    else:
-        raise RuntimeError("Unknown runtime environment")
-
-    return version
-
-
-def get_requirements() -> list[str]:
-    """Get Python package dependencies from requirements.txt."""
-    requirements_dir = ROOT_DIR / "requirements"
-
-    def _read_requirements(filename: str) -> list[str]:
-        with open(requirements_dir / filename) as f:
-            requirements = f.read().strip().split("\n")
-        resolved_requirements = []
-        for line in requirements:
-            if line.startswith("-r "):
-                resolved_requirements += _read_requirements(line.split()[1])
-            elif (
-                not line.startswith("--")
-                and not line.startswith("#")
-                and line.strip() != ""
-            ):
-                resolved_requirements.append(line)
-        return resolved_requirements
-
-    if _no_device():
-        requirements = _read_requirements("common.txt")
-    elif _is_cuda():
-        requirements = _read_requirements("cuda.txt")
-        cuda_major, cuda_minor = torch.version.cuda.split(".")
-        modified_requirements = []
-        for req in requirements:
-            if "vllm-flash-attn" in req and cuda_major != "12":
-                # vllm-flash-attn is built only for CUDA 12.x.
-                # Skip for other versions.
-                continue
-            modified_requirements.append(req)
-        requirements = modified_requirements
-    elif _is_hip():
-        requirements = _read_requirements("rocm.txt")
-    elif _is_tpu():
-        requirements = _read_requirements("tpu.txt")
-    elif _is_cpu():
-        requirements = _read_requirements("cpu.txt")
-    elif _is_xpu():
-        requirements = _read_requirements("xpu.txt")
-    else:
-        raise ValueError("Unsupported platform, please use CUDA, ROCm, or CPU.")
-    return requirements
 
 
 ext_modules = []
@@ -968,7 +810,7 @@ if _is_hip():
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
     if envs.VLLM_USE_PRECOMPILED or (
-        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
+        CUDA_HOME and get_selected_cuda_version() >= Version("12.3")
     ):
         # FA3 requires CUDA 12.3 or later
         ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
@@ -978,7 +820,7 @@ if _is_cuda():
         CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa4_cutedsl_C", optional=True)
     )
     if envs.VLLM_USE_PRECOMPILED or (
-        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.9")
+        CUDA_HOME and get_selected_cuda_version() >= Version("12.9")
     ):
         # FlashMLA requires CUDA 12.9 or later
         # Optional since this doesn't get built (produce an .so file) when
@@ -1039,41 +881,7 @@ else:
     }
 
 setup(
-    # static metadata should rather go in pyproject.toml
-    version=get_vllm_version(),
     ext_modules=ext_modules,
-    install_requires=get_requirements(),
-    extras_require={
-        # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch"],
-        "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
-        "tensorizer": ["tensorizer==2.10.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.2.2"],
-        "instanttensor": ["instanttensor >= 0.1.5"],
-        "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
-        "audio": [
-            "av",
-            "resampy",
-            "scipy",
-            "soundfile",
-            "mistral_common[audio]",
-        ],  # Required for audio processing
-        "video": [],  # Kept for backwards compatibility
-        "flashinfer": [],  # Kept for backwards compatibility
-        # Optional deps for AMD FP4 quantization support
-        "petit-kernel": ["petit-kernel"],
-        # Optional deps for Helion kernel development
-        "helion": ["helion==0.3.2"],
-        # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
-        # Optional deps for OpenTelemetry tracing
-        "otel": [
-            "opentelemetry-sdk>=1.26.0",
-            "opentelemetry-api>=1.26.0",
-            "opentelemetry-exporter-otlp>=1.26.0",
-            "opentelemetry-semantic-conventions-ai>=0.4.1",
-        ],
-    },
     cmdclass=cmdclass,
     package_data=package_data,
 )
