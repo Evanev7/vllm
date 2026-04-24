@@ -823,7 +823,7 @@ def _is_cuda() -> bool:
 
 def _is_hip() -> bool:
     return (
-        VLLM_TARGET_DEVICE == "cuda" or VLLM_TARGET_DEVICE == "rocm"
+        VLLM_TARGET_DEVICE == "rocm" # or VLLM_TARGET_DEVICE == "cuda" # todo reinstate HIP
     ) 
 
 
