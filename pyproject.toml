@@ -172,34 +172,6 @@ otel = [
   "opentelemetry-semantic-conventions-ai>=0.4.1",
 ]
 
-[tool.uv.sources]
-torch = [
-  { index = "pytorch-cu130", marker = "extra == 'cuda13'" },
-  { index = "pytorch-cu128", marker = "extra != 'cuda13' and extra == 'cuda12'" },
-  { index = "pytorch-cpu", marker = "extra != 'cuda13' and extra != 'cuda12'" },
-]
-torchaudio = [
-  { index = "pytorch-cu130" },
-]
-torchvision = [
-  { index = "pytorch-cu130" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
-explicit = true
-
 [project.urls]
 Homepage = "https://github.com/vllm-project/vllm"
 Documentation = "https://docs.vllm.ai/en/latest/"
